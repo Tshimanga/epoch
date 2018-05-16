@@ -13,11 +13,9 @@
 
 
 /*  A Fully Connected (FC) Neural Network is a stack of Layers  */
-   class FCNetwork {
+   class FCNetwork { // : Model
      var layerDom = {1..0},
-         cacheDom = {1..0},
          layers: [layerDom] Layer,
-         caches: [cacheDom] Cache, // Used if `trained` = false
          widths: [layerDom] int,
          loss: Loss,
          activations: [layerDom] string,
@@ -25,11 +23,8 @@
 
      proc init(dims: [] int, activations: [] string) {
        this.layerDom = {1..dims.size - 1};
-       this.cacheDom = {1..dims.size};
        var layers: [layerDom] Layer;
-       var caches: [cacheDom] Cache;
        this.layers = layers;
-       this.caches = caches;
        for l in layerDom {
          this.layers[l] = new Layer(activation = activations[l], udim = dims[l+1], ldim = dims[l]);
        }
@@ -37,19 +32,28 @@
      }
 
 /*  Sends input data through a forwardPass of the Neural Network  */
-     proc forwardPass(X:[]) {
+     proc forwardPass(X:[]) {  // this will be predict method of the neural network
        var Adom = X.domain;
        var A: [Adom] real = X;
        for l in this.layerDom {
          const Z = this.layers[l].linearForward(A);
          const A_current = this.layers[l].activationForward(Z);
-         if ! this.trained {   // trained models don't need to cache anything
-           this.caches[l] = new Cache();
-           this.caches[l].aDom = A.domain;
-           this.caches[l].A = A;
-           this.caches[l].zDom = Z.domain;
-           this.caches[l].Z = Z;
-         }
+         Adom = A_current.domain;
+         A = A_current;
+       }
+       return A;
+     }
+
+     proc forwardPass(X:[], caches: [] Cache) {
+       var Adom = X.domain;
+       var A: [Adom] real = X;
+       for l in this.layerDom {
+         const Z = this.layers[l].linearForward(A);
+         const A_current = this.layers[l].activationForward(Z);
+         caches[l].aDom = A.domain;
+         caches[l].A = A;
+         caches[l].zDom = Z.domain;
+         caches[l].Z = Z;
          Adom = A_current.domain;
          A = A_current;
        }
@@ -57,45 +61,78 @@
      }
 
 /*  Propagate errors back through networks and cache gradients  */
-     proc backwardPass(AL, Y) {
-  //     const dAL: [AL.domain] real = -(Y/AL - ((1-Y)/(1-AL)));
+     proc backwardPass(AL, Y, caches) {
        const dAL: [AL.domain] real = this.loss.dJ(Y,AL);
-       this.caches[cacheDom.size] = new Cache();
-       this.caches[cacheDom.size].aDom = dAL.domain;
-       this.caches[cacheDom.size].dA = dAL;
+       caches[caches.domain.size].aDom = dAL.domain;
+       caches[caches.domain.size].dA = dAL;
        for l in this.layerDom.low..this.layerDom.high by -1 {
-         var dZ = this.layers[l].activationBackward(dA = this.caches[l+1].dA, Z = this.caches[l].Z);
-         const (dW, db, dA_prev) = this.layers[l].linearBackward(dZ = dZ, this.caches[l].A);
-         this.caches[l].wDom = dW.domain;
-         this.caches[l].dW = dW;
-         this.caches[l].bDom = db.domain;
-         this.caches[l].db = db;
-         this.caches[l].dA = dA_prev;
+         var dZ = this.layers[l].activationBackward(dA = caches[l+1].dA, Z = caches[l].Z);
+         const (dW, db, dA_prev) = this.layers[l].linearBackward(dZ = dZ, caches[l].A);
+         caches[l].wDom = dW.domain;
+         caches[l].dW = dW;
+         caches[l].bDom = db.domain;
+         caches[l].db = db;
+         caches[l].dA = dA_prev;
        }
      }
 
 /*  UpdateParameters using cached gradients  */
-     proc updateParameters(learningRate = 0.001) {
+     proc updateParameters(learningRate = 0.001, caches, regularizer: Regularization) {
        for l in this.layerDom {
-         this.layers[l].W = this.layers[l].W - learningRate * this.caches[l].dW;
-         this.layers[l].b = this.layers[l].b - learningRate * this.caches[l].db;
+         this.layers[l].W = this.layers[l].W - learningRate * (regularizer.Q(this.layers[l].W).plus(caches[l].dW));  // dW = V_w if momentum is being used
+         this.layers[l].b = this.layers[l].b - learningRate * caches[l].db;  // db = V_b if momentum is being used
        }
-       for l in cacheDom {
-         this.caches[l] = new Cache();
+       for l in caches.domain {
+         delete caches[l];
+         caches[l] = new Cache();
        }
      }
+
 
 /*  Full front and back sweep with parameter updates  */
      proc fullSweep(X:[], Y:[], learningRate:real = 0.001) {
-       const output = this.forwardPass(X);
-  //     const cost = computeCost(Y, output);
+       var cacheDom: domain(1) = {1..this.layerDom.size + 1};
+       var caches: [cacheDom] Cache;
+       for l in cacheDom do caches[l] = new Cache();
+       const output = this.forwardPass(X, caches);
        const cost = this.loss.J(Y, output);
-       this.backwardPass(output, Y);
-       this.updateParameters(learningRate);
+       this.backwardPass(output, Y, caches);
+       this.updateParameters(learningRate, caches, regularizer = new Regularization());
+       delete caches;
        return (cost, output);
      }
 
-/*  Regular Gradient Descent Training  */
+/*  Full Sweep with Momentum and Regularization */
+     proc fullSweep(X:[], Y:[], learningRate:real = 0.001, momentum: real, velCaches: [] Cache, regularizer: Regularization) {
+       var cacheDom: domain(1) = {1..this.layerDom.size + 1};
+       var caches: [cacheDom] Cache;
+       for l in cacheDom do caches[l] = new Cache();
+       const output = this.forwardPass(X, caches);
+       const cost = this.loss.J(Y, output);
+       this.backwardPass(output, Y, caches);
+       for l in this.layerDom {
+         caches[l].dW = momentum * velCaches[l].W_vel + (1 - momentum) * caches[l].dW;
+         caches[l].db = momentum * velCaches[l].b_vel + (1 - momentum) * caches[l].db;
+         velCaches[l].W_vel = caches[l].dW;
+         velCaches[l].b_vel = caches[l].db;
+       }
+       this.updateParameters(learningRate, caches, regularizer);
+       delete caches;
+       return (cost, output);
+     }
+
+/*  Training with Suppressed Output  */
+     proc train_(X:[], Y:[], epochs = 100000, learningRate = 0.001, reportInterval = 1000) {
+       for i in 1..epochs {
+         var (cost, output) = this.fullSweep(X,Y,learningRate);
+       }
+       this.trained = true;
+       const preds = this.forwardPass(X);
+       const fcost = this.loss.J(Y, preds);
+     }
+
+
+/*  Regular Gradient Descent Training
      proc train(X:[], Y:[], epochs = 100000, learningRate = 0.001, reportInterval = 1000) {
        for i in 1..epochs {
          var (cost, output) = this.fullSweep(X,Y,learningRate);
@@ -105,14 +142,42 @@
        }
        this.trained = true;
        const preds = this.forwardPass(X);
-  //     const fcost = computeCost(Y, preds);
+       const fcost = this.loss.J(Y, preds);
+       writeln("");
+       writeln("Training Done... Final Cost: ",fcost);
+     }*/
+
+/*  Gradient Descent with Momentum and L2/L1 Regularization Options  */
+     proc train(X:[],
+                Y:[],
+                momentum: real = 0,
+                epochs = 100000,
+                learningRate = 0.001,
+                reportInterval = 1000,
+                regularization: string = "NONE",
+                alpha:real = 0) {
+       var regularizer = new Regularization(regularization, alpha);
+       var velCaches: [this.layerDom] Cache;
+       for l in this.layerDom {
+          velCaches[l] = new Cache();
+          velCaches[l].wDom = this.layers[l].wDom;
+          velCaches[l].bDom = this.layers[l].bDom;
+       }
+       for i in 1..epochs {
+         var (cost, output) = this.fullSweep(X,Y,learningRate, momentum: real, velCaches, regularizer);
+         if i % reportInterval == 0 || i == 1 {
+           try! writeln("epoch: ",i,",  cost: ",cost,";     ");
+         }
+       }
+       this.trained = true;
+       const preds = this.forwardPass(X);
        const fcost = this.loss.J(Y, preds);
        writeln("");
        writeln("Training Done... Final Cost: ",fcost);
      }
 
 /*  Minibatch Gradient Descent Training  */
-     proc train(X:[], Y:[], epochs: int = 100000, learningRate: real = 0.001, reportInterval: int = 1000, batchsize: int) {
+     proc trainMB(X:[], Y:[], epochs: int = 100000, learningRate: real = 0.001, reportInterval: int = 1000, batchsize: int) {
        var batches = 1 + X.shape[2]/batchsize: int;
        for i in 1..epochs {
          for batch in {1..batches} {
@@ -129,7 +194,6 @@
        }
        this.trained = true;
        const preds = this.forwardPass(X);
-       //const fcost = computeCost(Y, preds);
        const fcost = this.loss.J(Y, preds);
        writeln("");
        writeln("Training Done... Final Cost: ",fcost);
@@ -147,6 +211,8 @@
          wDom: domain(2),
          aDom: domain(2),
          zDom: domain(2),
+         W_vel: [wDom] real,
+         b_vel: [bDom] real,
          A:[aDom] real,
          Z:[zDom] real,
          dW:[wDom] real,
@@ -169,20 +235,31 @@
          b:[bDom] real,
          g: Activation;
 
+
 /*  Constructs a layer with given activation and weights/bias initialized
          with small random postive numbers                                */
-     proc init(activation: string, udim: int, ldim: int, eps = 0.1) {
+     proc init(activation: string, udim: int, ldim: int) {
        this.wDom = {1..udim,1..ldim};
        this.bDom = this.wDom.dim(1);
        var W: [wDom] real;
        var b: [bDom] real;
        this.W = W;
-       this.b = b;
+       this.b = b + 0.0000000000001;
        fillRandom(this.W);
-       fillRandom(this.b);
-       this.W = eps*this.W;
-       this.b = eps*this.b;
        this.g = new Activation(name=activation);
+       if this.g.name == "tanh" {
+         this.W = (this.W - 0.5) * sqrt(6/(W.shape[2] + W.shape[1]));
+       } else if this.g.name == "sigmoid" {
+         this.W = (this.W - 0.5) * sqrt(3.6/W.shape[2]);
+       } else if this.g.name == "linear" {
+         this.W = (this.W - 0.5) * sqrt(1/W.shape[2]);
+       } else if this.g.name == "relu" {
+         this.W = this.W * sqrt(2/W.shape[2]);
+       } else if this.g.name == "linear" {
+         this.W = (this.W - 0.5) * sqrt(2/W.shape[2]);
+       } else {
+         this.W = (this.W - 0.5) * sqrt(1/W.shape[2]);
+       }
      }
 
 /*  Computes an Affine Transformation on A_prev:  Z = W.A_prev + b  */
@@ -311,12 +388,37 @@
      }
   }
 
-  proc computeCost(Y:[], AL:[]) {
-    var Jp: [AL.domain] real = Y*log(AL) + (1-Y)*log(1-AL);
-    var J: real = -(+ reduce Jp)/AL.domain.dim(2).size;
-    return J;
-  }
+/*  A class for defined various types of regularization terms  */
+  class Regularization {
+    var name: string,
+        alpha: real;
+    proc init() {
+      this.name = "NONE";
+      this.alpha = 0;
+    }
 
+    proc init(name: string) {
+      this.name = name;
+    }
+
+    proc init(name: string, alpha: real) {
+      this.name = name;
+      this.alpha = alpha;
+    }
+
+    proc Q(W:[]) {
+      if this.name == "L2" {
+        var R: [W.domain] real = this.alpha * W;
+        return R;
+      } else if this.name == "L1" {
+        var R: [W.domain] real = this.alpha * sgn(W);
+        return R;
+      } else {
+        var R: [W.domain] real = 0 * W;
+        return R;
+      }
+    }
+  }
 
 
 /*  Class for Assigning the Appropiate Loss Function Based on Output Layer  */

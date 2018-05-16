@@ -1,2 +1,6 @@
 
 local.mk
+test/test
+examples/approximators/example
+
+
